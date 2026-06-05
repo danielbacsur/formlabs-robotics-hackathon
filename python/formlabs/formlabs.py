@@ -59,7 +59,6 @@ async def connect():
 
 
 def quat_to_euler(q):
-    # ahrs uses scalar-first [w, x, y, z], NED. Returns roll, pitch, yaw in degrees.
     w, x, y, z = q
     roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
     sinp = 2 * (w * y - z * x)
@@ -84,17 +83,16 @@ async def stream():
 
         raw_gyr = np.array([gx, gy, gz])
         gyr = (raw_gyr - gbias) * (math.pi / 180.0)
-        gyr[2] = -gyr[2]  # Rev2 BMI270 yaw axis
+        gyr[2] = -gyr[2]
         acc = np.array([ax, ay, az]) - abias
         mag = (np.array([mx, my, mz]) - moff) * mscale
-        mag[1:] = -mag[1:]  # Rev2 BMM150 axis fix
+        mag[1:] = -mag[1:]
 
         now = time.perf_counter()
         dt = 0.01 if last_t[0] is None else max(now - last_t[0], 1e-4)
         last_t[0] = now
         madgwick.Dt = dt
 
-        # Refine gyro bias only when truly still — decoupled from filter dynamics.
         if 0.95 < np.linalg.norm(acc) < 1.05 and np.linalg.norm(gyr) < math.radians(2):
             gbias[:] = 0.998 * gbias + 0.002 * raw_gyr
 

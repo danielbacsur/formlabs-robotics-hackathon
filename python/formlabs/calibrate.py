@@ -11,9 +11,6 @@ MAG_DURATION = 60.0
 
 
 async def static_calibration():
-    """Capture gyro bias AND accel bias from the same flat-and-still period.
-    Accel bias assumes gravity reads as [0, 0, +1g] in the body frame when the
-    board is flat with components facing up."""
     gyro_samples = []
     acc_samples = []
 
