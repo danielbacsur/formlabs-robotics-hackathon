@@ -73,6 +73,7 @@ async def stream():
         gx, gy, gz, ax, ay, az, mx, my, mz, *btn = PKT.unpack(data)
 
         gyr = (np.array([gx, gy, gz]) - gbias) * (math.pi / 180.0)  # deg/s -> rad/s
+        gyr[2] = -gyr[2]  # Rev2 BMI270 yaw direction matches NED only after Z flip
         acc = np.array([ax, ay, az])
         mag = (np.array([mx, my, mz]) - moff) * mscale
         mag[1] = -mag[1]  # Rev2 BMM150 axis fix (per Reefwing-AHRS)
@@ -173,6 +174,7 @@ def visualize():
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *_ = PKT.unpack(data)
         gyr = (np.array([gx, gy, gz]) - gbias) * (math.pi / 180.0)
+        gyr[2] = -gyr[2]  # Rev2 BMI270 yaw direction matches NED only after Z flip
         acc = np.array([ax, ay, az])
         mag = (np.array([mx, my, mz]) - moff) * mscale
         mag[1], mag[2] = -mag[1], -mag[2]
@@ -212,6 +214,7 @@ def visualize():
         ax.set_xlim(-0.6, 0.6); ax.set_ylim(-0.6, 0.6); ax.set_zlim(-0.6, 0.6)
         ax.set_xlabel("X — North"); ax.set_ylabel("Y — East"); ax.set_zlabel("Z — Down")
         ax.invert_zaxis()  # NED: +Z is down, visually flip so gravity points down
+        ax.invert_xaxis()  # flip X so the red N arrow points the visually opposite way
 
         # world reference frame
         ax.quiver(0, 0, 0, 0.5, 0, 0, color="red",   linewidth=2)
