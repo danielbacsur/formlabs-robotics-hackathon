@@ -1,21 +1,41 @@
 #include "ArduinoBLE.h"
 #include "Arduino_BMI270_BMM150.h"
+#include <FastLED.h>
 
 #define SVC "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2d"
 #define CHR "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2e"
-#define LEFT  0xf2bec62266b67b61ULL
-#define RIGHT 0x2a1159d4adc51cdbULL
+#define CHR_CTL "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2f"
+#define LED_PIN 2
+#define NUM_LEDS 4
+#define LEFT 0x2a1159d4adc51cdbULL
+#define RIGHT 0xf2bec62266b67b61ULL
 
 BLEService svc(SVC);
 BLECharacteristic chr(CHR, BLERead | BLENotify, 40);
+BLECharacteristic chrCtl(CHR_CTL, BLEWrite | BLEWriteWithoutResponse, 13);
+
+CRGB leds[NUM_LEDS];
+uint8_t piezo = 0;
+
+void onCtlWrite(BLEDevice, BLECharacteristic c) {
+  if (c.valueLength() < 13) return;
+  const uint8_t* p = c.value();
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = CRGB(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+  }
+  piezo = p[12];
+  FastLED.show();
+}
 
 void setup() {
   IMU.begin();
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.clear(true);
 
-  pinMode(A3, INPUT_PULLDOWN);
-  pinMode(A5, INPUT_PULLDOWN);
-  pinMode(D4, INPUT_PULLDOWN);
-  pinMode(D6, INPUT_PULLDOWN);
+  pinMode(A3, INPUT_PULLUP);
+  pinMode(A5, INPUT_PULLUP);
+  pinMode(D4, INPUT_PULLUP);
+  pinMode(D6, INPUT_PULLUP);
 
   uint64_t uid = ((uint64_t)NRF_FICR->DEVICEID[1] << 32) | NRF_FICR->DEVICEID[0];
   const char* name = uid == LEFT ? "left" : uid == RIGHT ? "right" : "unknown";
@@ -25,7 +45,9 @@ void setup() {
   BLE.setDeviceName(name);
   BLE.setAdvertisedService(svc);
   svc.addCharacteristic(chr);
+  svc.addCharacteristic(chrCtl);
   BLE.addService(svc);
+  chrCtl.setEventHandler(BLEWritten, onCtlWrite);
   BLE.advertise();
 }
 

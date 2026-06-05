@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-from ahrs.filters import Madgwick
 from bleak import BleakClient, BleakScanner
 
 
@@ -69,46 +68,169 @@ async def connect(side):
 
 
 def quat_to_euler(q):
+    """Accel-style roll/pitch + mag-style heading. Each component is read off
+    a different geometric projection of the quaternion, so they don't
+    cross-couple at extreme angles the way ZYX Euler does:
+      - roll: rotation of body+Z away from world+Z around body+X
+      - pitch: tilt of body+X above the horizon (+ = nose up)
+      - heading: compass bearing of body+X (0=N, 90=E, 180=S, 270=W)"""
     w, x, y, z = q
-    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
-    sinp = 2 * (w * y - z * x)
-    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
-    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
+    # world+Z (up) expressed in body coords = third row of body→world R
+    ux = 2 * (x * z - w * y)
+    uy = 2 * (y * z + w * x)
+    uz = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(uy, uz)
+    pitch = math.atan2(ux, math.sqrt(uy * uy + uz * uz))
+    # body+X (nose) expressed in world coords = first column of R
+    fx = 1 - 2 * (y * y + z * z)
+    fy = 2 * (x * y + w * z)
+    heading = math.atan2(-fy, fx)
+    return math.degrees(roll), math.degrees(pitch), math.degrees(heading)
+
+
+def _quat_normalize(q):
+    n = np.linalg.norm(q)
+    return q / n if n > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def _quat_integrate(q, omega, dt):
+    wx, wy, wz = omega
+    w, x, y, z = q
+    dq = 0.5 * dt * np.array([
+        -x * wx - y * wy - z * wz,
+         w * wx + y * wz - z * wy,
+         w * wy - x * wz + z * wx,
+         w * wz + x * wy - y * wx,
+    ])
+    return _quat_normalize(q + dq)
+
+
+def _slerp(q1, q2, t):
+    dot = float(np.dot(q1, q2))
+    if dot < 0:
+        q2, dot = -q2, -dot
+    if dot > 0.9995:
+        return _quat_normalize(q1 + t * (q2 - q1))
+    theta_0 = math.acos(max(-1.0, min(1.0, dot)))
+    sin_0 = math.sin(theta_0)
+    theta = theta_0 * t
+    s2 = math.sin(theta) / sin_0
+    s1 = math.cos(theta) - dot * s2
+    return s1 * q1 + s2 * q2
+
+
+def _rotmat_to_quat(R):
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        return _quat_normalize(np.array([
+            0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s
+        ]))
+    if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+        return _quat_normalize(np.array([
+            (R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s
+        ]))
+    if R[1, 1] > R[2, 2]:
+        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+        return _quat_normalize(np.array([
+            (R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s
+        ]))
+    s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+    return _quat_normalize(np.array([
+        (R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s
+    ]))
+
+
+def _quat_from_acc_mag(acc, mag):
+    """Body->world (NWU) quaternion from accel + tilt-compensated mag.
+    Returns None if either vector is degenerate."""
+    a_n = np.linalg.norm(acc)
+    m_n = np.linalg.norm(mag)
+    if a_n < 1e-6 or m_n < 1e-6:
+        return None
+    up = acc / a_n
+    m = mag / m_n
+    m_h = m - up * float(np.dot(m, up))
+    nh = np.linalg.norm(m_h)
+    if nh < 1e-6:
+        return None
+    north = m_h / nh
+    west = np.cross(up, north)
+    return _rotmat_to_quat(np.array([north, west, up]))
+
+
+class OrientationFilter:
+    """Quaternion complementary filter:
+      - gyro integrates the prediction
+      - accel + tilt-compensated mag give a measurement quaternion
+      - SLERP toward the measurement with a time-constant gain that's fast
+        when still and slow during motion (rejects linear accel & magnetic
+        disturbances)
+      - gyro bias is adapted only during sustained still periods"""
+
+    TAU_STILL = 0.3
+    TAU_MOVE = 1.0
+    STILL_FRAMES = 20
+
+    def __init__(self, cal):
+        self.gbias = xyz(cal["gyroscope"]["bias"]).copy()
+        self.abias = xyz(cal["accelerometer"]["bias"])
+        self.moff = xyz(cal["magnetometer"]["offset"])
+        self.mscale = xyz(cal["magnetometer"]["scale"])
+        self.q = None
+        self._still_n = 0
+
+    def update(self, raw_gyr, raw_acc, raw_mag, dt):
+        gyr = (raw_gyr - self.gbias) * (math.pi / 180.0)
+        acc = raw_acc - self.abias
+        mag = (raw_mag - self.moff) * self.mscale
+        # On the Nano 33 BLE Sense the Y axis is reported with a flipped
+        # sign on gyro, accel, and mag (the BMI270 gyro and BMM150 mag are
+        # mounted upside-down on Y relative to the accelerometer's printed
+        # board frame). Bring everything into the same right-handed body
+        # frame.
+        gyr[1] = -gyr[1]
+        acc[1] = -acc[1]
+        mag[1] = -mag[1]
+        mag[2] = -mag[2]
+
+        if self.q is None:
+            q0 = _quat_from_acc_mag(acc, mag)
+            self.q = q0 if q0 is not None else np.array([1.0, 0.0, 0.0, 0.0])
+
+        self.q = _quat_integrate(self.q, gyr, dt)
+        q_meas = _quat_from_acc_mag(acc, mag)
+        still = False
+        if q_meas is not None:
+            a_n = np.linalg.norm(acc)
+            still = abs(a_n - 1.0) < 0.03 and float(np.linalg.norm(gyr)) < math.radians(2)
+            tau = self.TAU_STILL if still else self.TAU_MOVE
+            self.q = _slerp(self.q, q_meas, 1.0 - math.exp(-dt / tau))
+
+        if still:
+            self._still_n += 1
+            if self._still_n > self.STILL_FRAMES:
+                self.gbias = 0.99 * self.gbias + 0.01 * raw_gyr
+        else:
+            self._still_n = 0
+
+        return self.q, still
 
 
 async def stream_one(side):
-    cal = load_cal(side)
-    gbias = xyz(cal["gyroscope"]["bias"])
-    abias = xyz(cal["accelerometer"]["bias"])
-    moff = xyz(cal["magnetometer"]["offset"])
-    mscale = xyz(cal["magnetometer"]["scale"])
-
-    madgwick = Madgwick(gain=0.02)
-    q = np.array([1.0, 0.0, 0.0, 0.0])
+    flt = OrientationFilter(load_cal(side))
     last_t = [None]
 
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *buttons = PKT.unpack(data)
-
-        raw_gyr = np.array([gx, gy, gz])
-        gyr = (raw_gyr - gbias) * (math.pi / 180.0)
-        gyr[2] = -gyr[2]
-        acc = np.array([ax, ay, az]) - abias
-        mag = (np.array([mx, my, mz]) - moff) * mscale
-        mag[1:] = -mag[1:]
-
         now = time.perf_counter()
-        dt = 0.01 if last_t[0] is None else max(now - last_t[0], 1e-4)
+        dt = 0.01 if last_t[0] is None else max(min(now - last_t[0], 0.2), 1e-4)
         last_t[0] = now
-        madgwick.Dt = dt
-
-        if 0.95 < np.linalg.norm(acc) < 1.05 and np.linalg.norm(gyr) < math.radians(2):
-            gbias[:] = 0.998 * gbias + 0.002 * raw_gyr
-
-        q[:] = madgwick.updateMARG(q, gyr=gyr, acc=acc, mag=mag)
-        roll, pitch, yaw = quat_to_euler(q)
-        print(f"[{side}] roll={roll} pitch={pitch} yaw={yaw}  buttons={buttons}")
+        q, _ = flt.update(np.array([gx, gy, gz]), np.array([ax, ay, az]),
+                          np.array([mx, my, mz]), dt)
+        roll, pitch, heading = quat_to_euler(q)
+        print(f"[{side}] roll={roll:+.2f} pitch={pitch:+.2f} heading={heading:+.2f}  buttons={buttons}")
 
     async with await connect(side) as ble:
         await ble.start_notify(CHR, on_notify)
@@ -135,36 +257,19 @@ def visualize(side):
     from matplotlib.animation import FuncAnimation
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-    cal = load_cal(side)
-    gbias = xyz(cal["gyroscope"]["bias"])
-    abias = xyz(cal["accelerometer"]["bias"])
-    moff = xyz(cal["magnetometer"]["offset"])
-    mscale = xyz(cal["magnetometer"]["scale"])
-
-    madgwick = Madgwick(gain=0.02)
+    flt = OrientationFilter(load_cal(side))
     state = {"q": np.array([1.0, 0.0, 0.0, 0.0]), "still": False}
     last_t = [None]
 
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *_ = PKT.unpack(data)
-        raw_gyr = np.array([gx, gy, gz])
-        gyr = (raw_gyr - gbias) * (math.pi / 180.0)
-        gyr[2] = -gyr[2]
-        acc = np.array([ax, ay, az]) - abias
-        mag = (np.array([mx, my, mz]) - moff) * mscale
-        mag[1:] = -mag[1:]
-
         now = time.perf_counter()
-        dt = 0.01 if last_t[0] is None else max(now - last_t[0], 1e-4)
+        dt = 0.01 if last_t[0] is None else max(min(now - last_t[0], 0.2), 1e-4)
         last_t[0] = now
-        madgwick.Dt = dt
-
-        still = 0.95 < np.linalg.norm(acc) < 1.05 and np.linalg.norm(gyr) < math.radians(2)
-        if still:
-            gbias[:] = 0.998 * gbias + 0.002 * raw_gyr
+        q, still = flt.update(np.array([gx, gy, gz]), np.array([ax, ay, az]),
+                              np.array([mx, my, mz]), dt)
+        state["q"] = q
         state["still"] = still
-
-        state["q"] = np.asarray(madgwick.updateMARG(state["q"], gyr=gyr, acc=acc, mag=mag))
 
     def run_ble():
         async def loop():
@@ -192,17 +297,15 @@ def visualize(side):
         ax.set_ylim(-0.6, 0.6)
         ax.set_zlim(-0.6, 0.6)
         ax.set_xlabel("X — North")
-        ax.set_ylabel("Y — East")
-        ax.set_zlabel("Z — Down")
-        ax.invert_zaxis()
-        ax.invert_xaxis()
+        ax.set_ylabel("Y — West")
+        ax.set_zlabel("Z — Up")
 
         ax.quiver(0, 0, 0, 0.5, 0, 0, color="red",   linewidth=2)
         ax.quiver(0, 0, 0, 0, 0.5, 0, color="green", linewidth=2)
         ax.quiver(0, 0, 0, 0, 0, 0.5, color="blue",  linewidth=2)
         ax.text(0.55, 0, 0, "N", color="red")
-        ax.text(0, 0.55, 0, "E", color="green")
-        ax.text(0, 0, 0.55, "D", color="blue")
+        ax.text(0, 0.55, 0, "W", color="green")
+        ax.text(0, 0, 0.55, "U", color="blue")
 
         R = quat_to_rotmat(state["q"])
         rotated = verts @ R.T
@@ -215,10 +318,10 @@ def visualize(side):
         nose = R @ np.array([L * 0.7, 0, 0])
         ax.quiver(0, 0, 0, nose[0], nose[1], nose[2], color="magenta", linewidth=2)
 
-        r, p, y = quat_to_euler(state["q"])
+        r, p, h = quat_to_euler(state["q"])
         tag = "  [bias↻]" if state["still"] else ""
         ax.set_title(
-            f"[{side}]  roll={r:+6.1f}°  pitch={p:+6.1f}°  yaw={y:+6.1f}°{tag}",
+            f"[{side}]  roll={r:+6.1f}°  pitch={p:+6.1f}°  heading={h:+6.1f}°{tag}",
             fontfamily="monospace",
         )
 
