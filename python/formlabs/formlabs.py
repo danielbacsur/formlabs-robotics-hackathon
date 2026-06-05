@@ -13,6 +13,7 @@ from bleak import BleakClient, BleakScanner
 
 SVC = "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2d"
 CHR = "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2e"
+CHR_CTL = "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2f"
 PKT = struct.Struct("<9f4b")
 
 SIDES = ("left", "right")
@@ -65,6 +66,54 @@ async def connect(side):
     if device is None:
         raise SystemExit(f"no '{side}' peripheral advertising {SVC}")
     return BleakClient(device)
+
+
+# One color per button (ba, bb, bc, bd). Buttons are wired in reverse:
+# button index 0 → physical LED 3, index 1 → LED 2, etc.
+BUTTON_COLORS: list[tuple[int, int, int]] = [
+    (255,   0,   0),  # ba — red
+    (  0, 255,   0),  # bb — green
+    (  0,   0, 255),  # bc — blue
+    (255, 165,   0),  # bd — orange
+]
+_BUTTON_TO_LED = [3, 2, 1, 0]
+
+
+def _pitch_brightness(pitch: float) -> int:
+    """Map pitch (-90..+90 °) linearly to 0-255. Higher pitch → brighter."""
+    return int(max(0.0, min(1.0, (pitch + 90.0) / 180.0)) * 255)
+
+
+def _led_colors_for(pitch: float, buttons: list[int]) -> list[tuple[int, int, int]]:
+    brightness = _pitch_brightness(pitch)
+    colors: list[tuple[int, int, int]] = [(0, 0, 0)] * 4
+    for btn_idx, pressed in enumerate(buttons):
+        if pressed:
+            r, g, b = BUTTON_COLORS[btn_idx]
+            led = _BUTTON_TO_LED[btn_idx]
+            colors[led] = (
+                r * brightness // 255,
+                g * brightness // 255,
+                b * brightness // 255,
+            )
+    return colors
+
+
+async def set_leds(ble: BleakClient, colors: list[tuple[int, int, int]], piezo: int = 0):
+    """Write RGB values to the 4 NeoPixels on the device.
+
+    colors: list of 4 (r, g, b) tuples, each component 0-255.
+    piezo:  optional piezo value (0-255).
+    """
+    if len(colors) != 4:
+        raise ValueError("exactly 4 RGB tuples required")
+    payload = bytearray(13)
+    for i, (r, g, b) in enumerate(colors):
+        payload[i * 3] = r & 0xFF
+        payload[i * 3 + 1] = g & 0xFF
+        payload[i * 3 + 2] = b & 0xFF
+    payload[12] = piezo & 0xFF
+    await ble.write_gatt_char(CHR_CTL, payload, response=False)
 
 
 def quat_to_euler(q):
@@ -221,6 +270,7 @@ class OrientationFilter:
 async def stream_one(side):
     flt = OrientationFilter(load_cal(side))
     last_t = [None]
+    ble_ref: list[BleakClient | None] = [None]
 
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *buttons = PKT.unpack(data)
@@ -232,7 +282,12 @@ async def stream_one(side):
         roll, pitch, heading = quat_to_euler(q)
         print(f"[{side}] roll={roll:+.2f} pitch={pitch:+.2f} heading={heading:+.2f}  buttons={buttons}")
 
+        if ble_ref[0] is not None:
+            colors = _led_colors_for(pitch, buttons)
+            asyncio.ensure_future(set_leds(ble_ref[0], colors))
+
     async with await connect(side) as ble:
+        ble_ref[0] = ble
         await ble.start_notify(CHR, on_notify)
         await asyncio.Event().wait()
 
