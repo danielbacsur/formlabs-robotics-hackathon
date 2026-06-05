@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import struct
+import sys
 import time
 from pathlib import Path
 
@@ -14,6 +15,7 @@ SVC = "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2d"
 CHR = "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2e"
 PKT = struct.Struct("<9f4b")
 
+SIDES = ("left", "right")
 CAL_PATH = Path(__file__).parent / ".formlabs" / "calibration.json"
 
 
@@ -34,27 +36,34 @@ def _deep_merge(dst, src):
     return dst
 
 
-def load_cal():
+def load_cal(side):
     if not CAL_PATH.exists():
-        raise SystemExit(f"{CAL_PATH} not found — run calibrate.py first")
-    return json.loads(CAL_PATH.read_text())
+        raise SystemExit(f"{CAL_PATH} not found — run calibrate.py {side} first")
+    cal = json.loads(CAL_PATH.read_text())
+    if side not in cal:
+        raise SystemExit(f"no calibration for '{side}' — run calibrate.py {side}")
+    return cal[side]
 
 
-def save_cal(updates):
+def save_cal(side, updates):
     CAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     cal = json.loads(CAL_PATH.read_text()) if CAL_PATH.exists() else {}
-    _deep_merge(cal, updates)
+    cal.setdefault(side, {})
+    _deep_merge(cal[side], updates)
     CAL_PATH.write_text(json.dumps(cal, indent=2))
-    print(f"wrote {CAL_PATH}: {updates}")
+    print(f"wrote {CAL_PATH} [{side}]: {updates}")
 
 
-async def connect():
+async def connect(side):
     device = await BleakScanner.find_device_by_filter(
-        lambda _, advert: SVC in (uuid.lower() for uuid in advert.service_uuids),
+        lambda _, advert: (
+            SVC in (u.lower() for u in advert.service_uuids)
+            and (advert.local_name or "").lower() == side
+        ),
         timeout=20.0,
     )
     if device is None:
-        raise SystemExit(f"no peripheral advertising {SVC}")
+        raise SystemExit(f"no '{side}' peripheral advertising {SVC}")
     return BleakClient(device)
 
 
@@ -67,8 +76,8 @@ def quat_to_euler(q):
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
-async def stream():
-    cal = load_cal()
+async def stream_one(side):
+    cal = load_cal(side)
     gbias = xyz(cal["gyroscope"]["bias"])
     abias = xyz(cal["accelerometer"]["bias"])
     moff = xyz(cal["magnetometer"]["offset"])
@@ -98,15 +107,25 @@ async def stream():
 
         q[:] = madgwick.updateMARG(q, gyr=gyr, acc=acc, mag=mag)
         roll, pitch, yaw = quat_to_euler(q)
-        print(f"roll={roll} pitch={pitch} yaw={yaw}  buttons={buttons}")
+        print(f"[{side}] roll={roll} pitch={pitch} yaw={yaw}  buttons={buttons}")
 
-    async with await connect() as ble:
+    async with await connect(side) as ble:
         await ble.start_notify(CHR, on_notify)
         await asyncio.Event().wait()
 
 
+async def stream(*sides):
+    if not sides:
+        sides = SIDES
+    await asyncio.gather(*(stream_one(s) for s in sides))
+
+
 if __name__ == "__main__":
+    args = sys.argv[1:]
+    for a in args:
+        if a not in SIDES:
+            raise SystemExit(f"usage: formlabs.py [{' | '.join(SIDES)}] ...")
     try:
-        asyncio.run(stream())
+        asyncio.run(stream(*args))
     except KeyboardInterrupt:
         pass

@@ -3,14 +3,14 @@ import sys
 
 import numpy as np
 
-from formlabs import CHR, PKT, connect, save_cal, to_xyz
+from formlabs import CHR, PKT, SIDES, connect, save_cal, to_xyz
 
 
 STATIC_DURATION = 60.0
 MAG_DURATION = 60.0
 
 
-async def static_calibration():
+async def static_calibration(side):
     gyro_samples = []
     acc_samples = []
 
@@ -19,8 +19,8 @@ async def static_calibration():
         gyro_samples.append((gx, gy, gz))
         acc_samples.append((ax, ay, az))
 
-    async with await connect() as ble:
-        print(f"STATIC: place the board STILL and FLAT (components up) for {int(STATIC_DURATION)}s ...")
+    async with await connect(side) as ble:
+        print(f"[{side}] STATIC: place the board STILL and FLAT (components up) for {int(STATIC_DURATION)}s ...")
         await ble.start_notify(CHR, on_notify)
         await asyncio.sleep(STATIC_DURATION)
         await ble.stop_notify(CHR)
@@ -30,21 +30,21 @@ async def static_calibration():
     print(f"  collected {len(gyro_samples)} samples")
     print(f"  gyro bias = {gbias.tolist()}")
     print(f"  accel bias = {abias.tolist()}")
-    save_cal({
+    save_cal(side, {
         "gyroscope":     {"bias": to_xyz(gbias)},
         "accelerometer": {"bias": to_xyz(abias)},
     })
 
 
-async def mag_calibration():
+async def mag_calibration(side):
     samples = []
 
     def on_notify(_, data):
         _gx, _gy, _gz, _ax, _ay, _az, mx, my, mz, *_ = PKT.unpack(data)
         samples.append((mx, my, mz))
 
-    async with await connect() as ble:
-        print(f"\nMAG: rotate the board through every orientation (figure-8s) for {int(MAG_DURATION)}s ...")
+    async with await connect(side) as ble:
+        print(f"\n[{side}] MAG: rotate the board through every orientation (figure-8s) for {int(MAG_DURATION)}s ...")
         await ble.start_notify(CHR, on_notify)
         await asyncio.sleep(MAG_DURATION)
         await ble.stop_notify(CHR)
@@ -63,19 +63,21 @@ async def mag_calibration():
     if (rng < rng.mean() * 0.5).any():
         print("  warning: one axis has <50% range of the others — recapture with more rotation",
               file=sys.stderr)
-    save_cal({"magnetometer": {"offset": to_xyz(offset), "scale": to_xyz(scale)}})
+    save_cal(side, {"magnetometer": {"offset": to_xyz(offset), "scale": to_xyz(scale)}})
 
 
-async def main():
-    await static_calibration()
-    print("\nSTATIC done. Pick up the board — mag calibration starts in 5s ...")
+async def main(side):
+    await static_calibration(side)
+    print(f"\n[{side}] STATIC done. Pick up the board — mag calibration starts in 5s ...")
     await asyncio.sleep(5)
-    await mag_calibration()
-    print("\ncalibration complete")
+    await mag_calibration(side)
+    print(f"\n[{side}] calibration complete")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in SIDES:
+        raise SystemExit(f"usage: calibrate.py [{' | '.join(SIDES)}]")
     try:
-        asyncio.run(main())
+        asyncio.run(main(sys.argv[1]))
     except KeyboardInterrupt:
         pass

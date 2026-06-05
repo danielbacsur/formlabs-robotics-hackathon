@@ -3,6 +3,8 @@
 
 #define SVC "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2d"
 #define CHR "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2e"
+#define LEFT  0xf2bec62266b67b61ULL
+#define RIGHT 0x2a1159d4adc51cdbULL
 
 BLEService svc(SVC);
 BLECharacteristic chr(CHR, BLERead | BLENotify, 40);
@@ -15,7 +17,12 @@ void setup() {
   pinMode(D4, INPUT_PULLDOWN);
   pinMode(D6, INPUT_PULLDOWN);
 
+  uint64_t uid = ((uint64_t)NRF_FICR->DEVICEID[1] << 32) | NRF_FICR->DEVICEID[0];
+  const char* name = uid == LEFT ? "left" : uid == RIGHT ? "right" : "unknown";
+
   BLE.begin();
+  BLE.setLocalName(name);
+  BLE.setDeviceName(name);
   BLE.setAdvertisedService(svc);
   svc.addCharacteristic(chr);
   BLE.addService(svc);
