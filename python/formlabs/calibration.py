@@ -76,7 +76,7 @@ async def main(side):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in SIDES:
-        raise SystemExit(f"usage: calibrate.py [{' | '.join(SIDES)}]")
+        raise SystemExit(f"usage: calibration.py [{' | '.join(SIDES)}]")
     try:
         asyncio.run(main(sys.argv[1]))
     except KeyboardInterrupt:

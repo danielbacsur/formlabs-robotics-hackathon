@@ -38,10 +38,10 @@ def _deep_merge(dst, src):
 
 def load_cal(side):
     if not CAL_PATH.exists():
-        raise SystemExit(f"{CAL_PATH} not found — run calibrate.py {side} first")
+        raise SystemExit(f"{CAL_PATH} not found — run calibration.py {side} first")
     cal = json.loads(CAL_PATH.read_text())
     if side not in cal:
-        raise SystemExit(f"no calibration for '{side}' — run calibrate.py {side}")
+        raise SystemExit(f"no calibration for '{side}' — run calibration.py {side}")
     return cal[side]
 
 
