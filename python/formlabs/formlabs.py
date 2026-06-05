@@ -65,14 +65,15 @@ async def stream():
     mscale = np.array(cal["mag_scale"], dtype=float)
     decl = float(cal["declination_deg"])
 
-    madgwick = Madgwick(gain=0.041)
+    madgwick = Madgwick(gain=0.02)
     q = np.array([1.0, 0.0, 0.0, 0.0])
     last_t = [None]
 
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *btn = PKT.unpack(data)
 
-        gyr = (np.array([gx, gy, gz]) - gbias) * (math.pi / 180.0)  # deg/s -> rad/s
+        raw_gyr = np.array([gx, gy, gz])  # raw deg/s, pre-flip — matches gbias frame
+        gyr = (raw_gyr - gbias) * (math.pi / 180.0)
         gyr[2] = -gyr[2]  # Rev2 BMI270 yaw direction matches NED only after Z flip
         acc = np.array([ax, ay, az])
         mag = (np.array([mx, my, mz]) - moff) * mscale
@@ -83,6 +84,11 @@ async def stream():
         dt = 0.01 if last_t[0] is None else max(now - last_t[0], 1e-4)
         last_t[0] = now
         madgwick.Dt = dt
+
+        # Continuous bias refinement via per-sample EMA whenever the board is
+        # still. Filter dynamics untouched.
+        if 0.95 < np.linalg.norm(acc) < 1.05 and np.linalg.norm(gyr) < math.radians(2):
+            gbias[:] = 0.998 * gbias + 0.002 * raw_gyr
 
         q[:] = madgwick.updateMARG(q, gyr=gyr, acc=acc, mag=mag)
         roll, pitch, yaw = quat_to_euler(q)
@@ -167,13 +173,14 @@ def visualize():
     mscale = np.array(cal["mag_scale"], dtype=float)
     decl = float(cal["declination_deg"])
 
-    madgwick = Madgwick(gain=0.041)
-    state = {"q": np.array([1.0, 0.0, 0.0, 0.0]), "rpyh": (0.0, 0.0, 0.0, 0.0)}
+    madgwick = Madgwick(gain=0.02)
+    state = {"q": np.array([1.0, 0.0, 0.0, 0.0]), "rpyh": (0.0, 0.0, 0.0, 0.0), "still": False}
     last_t = [None]
 
     def on_notify(_, data):
         gx, gy, gz, ax, ay, az, mx, my, mz, *_ = PKT.unpack(data)
-        gyr = (np.array([gx, gy, gz]) - gbias) * (math.pi / 180.0)
+        raw_gyr = np.array([gx, gy, gz])
+        gyr = (raw_gyr - gbias) * (math.pi / 180.0)
         gyr[2] = -gyr[2]  # Rev2 BMI270 yaw direction matches NED only after Z flip
         acc = np.array([ax, ay, az])
         mag = (np.array([mx, my, mz]) - moff) * mscale
@@ -183,6 +190,13 @@ def visualize():
         dt = 0.01 if last_t[0] is None else max(now - last_t[0], 1e-4)
         last_t[0] = now
         madgwick.Dt = dt
+
+        still = (0.95 < np.linalg.norm(acc) < 1.05
+                 and np.linalg.norm(gyr) < math.radians(2))
+        if still:
+            gbias[:] = 0.998 * gbias + 0.002 * raw_gyr
+
+        state["still"] = still
 
         state["q"] = np.asarray(madgwick.updateMARG(state["q"], gyr=gyr, acc=acc, mag=mag))
         r, p, y = quat_to_euler(state["q"])
@@ -211,8 +225,12 @@ def visualize():
 
     def update(_frame):
         ax.clear()
-        ax.set_xlim(-0.6, 0.6); ax.set_ylim(-0.6, 0.6); ax.set_zlim(-0.6, 0.6)
-        ax.set_xlabel("X — North"); ax.set_ylabel("Y — East"); ax.set_zlabel("Z — Down")
+        ax.set_xlim(-0.6, 0.6)
+        ax.set_ylim(-0.6, 0.6)
+        ax.set_zlim(-0.6, 0.6)
+        ax.set_xlabel("X — North")
+        ax.set_ylabel("Y — East")
+        ax.set_zlabel("Z — Down")
         ax.invert_zaxis()  # NED: +Z is down, visually flip so gravity points down
         ax.invert_xaxis()  # flip X so the red N arrow points the visually opposite way
 
@@ -238,8 +256,9 @@ def visualize():
         ax.quiver(0, 0, 0, nose[0], nose[1], nose[2], color="magenta", linewidth=2)
 
         r, p, y, h = state["rpyh"]
+        tag = "  [bias↻]" if state["still"] else ""
         ax.set_title(
-            f"roll={r:+6.1f}°  pitch={p:+6.1f}°  yaw={y:+6.1f}°  heading={h:6.1f}°",
+            f"roll={r:+6.1f}°  pitch={p:+6.1f}°  yaw={y:+6.1f}°  heading={h:6.1f}°{tag}",
             fontfamily="monospace",
         )
 
