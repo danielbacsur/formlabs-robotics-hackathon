@@ -5,7 +5,7 @@
 #define SVC "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2d"
 #define CHR "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2e"
 #define CHR_CTL "fa9b1d2c-3e4f-4a5b-9c6d-7e8f9a0b1c2f"
-#define LED_PIN 2
+#define LED_PIN 3
 #define NUM_LEDS 4
 #define LEFT 0x2a1159d4adc51cdbULL
 #define RIGHT 0xf2bec62266b67b61ULL
