@@ -12,10 +12,10 @@ BLECharacteristic chr(CHR, BLERead | BLENotify, 40);
 void setup() {
   IMU.begin();
 
-  pinMode(A3, INPUT_PULLDOWN);
-  pinMode(A5, INPUT_PULLDOWN);
-  pinMode(D4, INPUT_PULLDOWN);
-  pinMode(D6, INPUT_PULLDOWN);
+  pinMode(A3, INPUT_PULLUP);
+  pinMode(A5, INPUT_PULLUP);
+  pinMode(D4, INPUT_PULLUP);
+  pinMode(D6, INPUT_PULLUP);
 
   uint64_t uid = ((uint64_t)NRF_FICR->DEVICEID[1] << 32) | NRF_FICR->DEVICEID[0];
   const char* name = uid == LEFT ? "left" : uid == RIGHT ? "right" : "unknown";
