@@ -88,7 +88,7 @@ def _led_colors_for(pitch: float, buttons: list[int]) -> list[tuple[int, int, in
     brightness = _pitch_brightness(pitch)
     colors: list[tuple[int, int, int]] = [(0, 0, 0)] * 4
     for btn_idx, pressed in enumerate(buttons):
-        if not pressed:
+        if pressed:
             r, g, b = BUTTON_COLORS[btn_idx]
             led = _BUTTON_TO_LED[btn_idx]
             colors[led] = (
