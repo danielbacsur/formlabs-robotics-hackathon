@@ -76,7 +76,7 @@ def quat_to_euler(q):
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
-async def stream_one(side):
+async def stream_one(side, callback=None):
     cal = load_cal(side)
     gbias = xyz(cal["gyroscope"]["bias"])
     abias = xyz(cal["accelerometer"]["bias"])
@@ -107,17 +107,30 @@ async def stream_one(side):
 
         q[:] = madgwick.updateMARG(q, gyr=gyr, acc=acc, mag=mag)
         roll, pitch, yaw = quat_to_euler(q)
-        print(f"[{side}] roll={roll} pitch={pitch} yaw={yaw}  buttons={buttons}")
+        update = {
+            "side": side,
+            "gyroscope": {"x": float(gx), "y": float(gy), "z": float(gz)},
+            "accelerometer": {"x": float(ax), "y": float(ay), "z": float(az)},
+            "magnetometer": {"x": float(mx), "y": float(my), "z": float(mz)},
+            "buttons": buttons,
+            "orientation": {"roll": roll, "pitch": pitch, "yaw": yaw},
+            "timestamp": now,
+        }
+
+        if callback is not None:
+            callback(update)
+
+        #print(f"[{side}] roll={roll} pitch={pitch} yaw={yaw}  buttons={buttons}")
 
     async with await connect(side) as ble:
         await ble.start_notify(CHR, on_notify)
         await asyncio.Event().wait()
 
 
-async def stream(*sides):
+async def stream(*sides, callback=None):
     if not sides:
         sides = SIDES
-    await asyncio.gather(*(stream_one(s) for s in sides))
+    await asyncio.gather(*(stream_one(s, callback=callback) for s in sides))
 
 
 if __name__ == "__main__":
