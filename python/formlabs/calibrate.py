@@ -10,7 +10,7 @@ STATIC_DURATION = 60.0
 MAG_DURATION = 60.0
 
 
-async def static_calibration(name=None):
+async def static_calibration():
     """Capture gyro bias AND accel bias from the same flat-and-still period.
     Accel bias assumes gravity reads as [0, 0, +1g] in the body frame when the
     board is flat with components facing up."""
@@ -22,7 +22,7 @@ async def static_calibration(name=None):
         gyro_samples.append((gx, gy, gz))
         acc_samples.append((ax, ay, az))
 
-    async with await connect(name) as ble:
+    async with await connect() as ble:
         print(f"STATIC: place the board STILL and FLAT (components up) for {int(STATIC_DURATION)}s ...")
         await ble.start_notify(CHR, on_notify)
         await asyncio.sleep(STATIC_DURATION)
@@ -39,14 +39,14 @@ async def static_calibration(name=None):
     })
 
 
-async def mag_calibration(name=None):
+async def mag_calibration():
     samples = []
 
     def on_notify(_, data):
         _gx, _gy, _gz, _ax, _ay, _az, mx, my, mz, *_ = PKT.unpack(data)
         samples.append((mx, my, mz))
 
-    async with await connect(name) as ble:
+    async with await connect() as ble:
         print(f"\nMAG: rotate the board through every orientation (figure-8s) for {int(MAG_DURATION)}s ...")
         await ble.start_notify(CHR, on_notify)
         await asyncio.sleep(MAG_DURATION)
@@ -69,17 +69,16 @@ async def mag_calibration(name=None):
     save_cal({"magnetometer": {"offset": to_xyz(offset), "scale": to_xyz(scale)}})
 
 
-async def main(name=None):
-    await static_calibration(name)
+async def main():
+    await static_calibration()
     print("\nSTATIC done. Pick up the board — mag calibration starts in 5s ...")
     await asyncio.sleep(5)
-    await mag_calibration(name)
+    await mag_calibration()
     print("\ncalibration complete")
 
 
 if __name__ == "__main__":
-    name = sys.argv[1] if len(sys.argv) > 1 else None
     try:
-        asyncio.run(main(name))
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
